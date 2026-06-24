@@ -8,7 +8,7 @@ body.auth-mode {
   font-family: 'Plus Jakarta Sans', Arial, sans-serif !important;
 }
 
-body.landing-mode #auth-page,
+body.landing-mode #auth-page, 
 body.landing-mode #custom-pages,
 body.landing-mode .auth-home-link,
 body.auth-mode #landing-page,
