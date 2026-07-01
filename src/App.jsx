@@ -1,7 +1,9 @@
 import { Link, NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import { store } from './storage.js';
-import { fetchProfile, fetchRepos, portfolioSeed } from './github.js';
+import { portfolioSeed } from './github.js';
+import { importGithub } from './api/githubApi';
+import { registerUser, loginUser } from "./api/authApi";
 
 const TEMPLATES = [
   { id: 'minimal', name: 'Minimal', desc: 'Clean, editorial, lots of whitespace. Lets the work speak.' },
@@ -108,21 +110,49 @@ function Auth({ mode }) {
   const navigate = useNavigate();
   const [error, setError] = useState('');
   const isSignup = mode === 'signup';
-  function submit(event) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const email = String(form.get('email')).trim().toLowerCase();
-    const password = String(form.get('password'));
+  async function submit(event) {
+  event.preventDefault();
+
+  const form = new FormData(event.currentTarget);
+
+  const name = String(form.get("name") || "").trim();
+  const email = String(form.get("email")).trim().toLowerCase();
+  const password = String(form.get("password"));
+
+  try {
     if (isSignup) {
-      store.saveUser({ name: String(form.get('name')).trim() || 'Alex', email, password });
-      navigate('/dashboard');
+      const data = await registerUser({
+        name,
+        email,
+        password,
+      });
+
+      localStorage.setItem("token", data.token);
+
+      store.setCurrentUser(data.user);
+
+      navigate("/dashboard");
+
       return;
     }
-    const user = store.findUser(email, password);
-    if (!user) return setError('Email or password is incorrect.');
-    store.setCurrentUser({ name: user.name, email: user.email });
-    navigate('/dashboard');
+
+    const data = await loginUser({
+      email,
+      password,
+    });
+
+    localStorage.setItem("token", data.token);
+
+    store.setCurrentUser(data.user);
+
+    navigate("/dashboard");
+
+  } catch (err) {
+    setError(
+      err.response?.data?.message || "Something went wrong"
+    );
   }
+}
   return <main className="auth-page"><Link className="home-icon" to="/"><i className="fa-solid fa-house" /></Link><form className="auth-card" onSubmit={submit}><span className="pill">AutoPortfolio</span><h1>{isSignup ? 'Create your account' : 'Sign in'}</h1><p>{isSignup ? 'Start turning your GitHub work into a polished portfolio.' : 'Continue building your professional portfolio workspace.'}</p>{isSignup && <><label>Name</label><input name="name" placeholder="Your name" required /></>}<label>Email</label><input name="email" type="email" placeholder="you@example.com" required /><label>Password</label><input name="password" type="password" placeholder="Your password" required /><button>{isSignup ? 'Create Account' : 'Sign In'}</button>{error && <small className="error">{error}</small>}<p className="switch">{isSignup ? 'Already have an account?' : "Don't have an account?"} <Link to={isSignup ? '/login' : '/signup'}>{isSignup ? 'Sign in' : 'Create account'}</Link></p></form></main>;
 }
 
@@ -134,19 +164,34 @@ function Dashboard() {
   const [error, setError] = useState('');
   function choose(method) { localStorage.setItem('buildMethod', method); navigate('/templates'); }
   async function connectGithub(event) {
-    event.preventDefault();
-    setError('');
-    setStatus('loading');
-    try {
-      const [profile, repos] = await Promise.all([fetchProfile(username), fetchRepos(username)]);
-      store.saveGithub(profile.login, profile, repos);
-      localStorage.setItem('buildMethod', 'github');
-      navigate('/profile');
-    } catch (err) {
-      setStatus('idle');
-      setError(err.message);
-    }
+
+  event.preventDefault();
+  setError("");
+  setStatus("loading");
+
+  try {
+    const token = localStorage.getItem("token");
+
+    const result = await importGithub(username, token);
+
+    console.log(result);
+
+    // البيانات اللي رجعت من الـBackend
+    const portfolio = result.portfolio;
+
+    // خزنيها في الـstore
+    store.saveBuilder(portfolio);
+
+    localStorage.setItem("buildMethod", "github");
+
+    navigate("/builder");
+  } catch (err) {
+    console.log(err);
+
+    setStatus("idle");
+    setError(err.message);
   }
+}
   return <div className="framed dashboard-frame"><SiteNav active="dashboard" cta={false} /><main className="dashboard"><h1>Hello, {user?.name || 'Alex'}!</h1><p>How would you like to build your portfolio today?</p><div className="choice-grid"><article><i className="fa-solid fa-terminal icon navy" /><i className="fa-solid fa-cloud-arrow-up ghost" /><h2>Import from GitHub</h2><p>Seamlessly sync your technical journey. We auto-fetch your public repositories, top contributions, and language statistics.</p><form className="github-connect" onSubmit={connectGithub}><div className="gh-field"><i className="fa-brands fa-github" /><span className="gh-at">@</span><input name="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="your-github-username" autoComplete="off" spellCheck="false" required /></div><button disabled={status === 'loading'}>{status === 'loading' ? <><i className="fa-solid fa-rotate fa-spin" /> Syncing your repos…</> : <><i className="fa-brands fa-github" /> Connect GitHub</>}</button></form>{error && <small className="error">{error}</small>}<small>Fetches your public repositories</small></article><article><i className="fa-solid fa-wand-magic-sparkles icon mint" /><i className="fa-solid fa-pen ghost" /><h2>Build Manually</h2><p>Full creative control over every detail. Best for designers, product managers, or specific case studies.</p><button className="outline" onClick={() => choose('manual')}><i className="fa-regular fa-circle-plus" /> Start Building</button><small>Custom canvas approach</small></article></div><section className="guide"><span>Quick Start Guide</span><h2>New to AutoPortfolio?</h2><p>Watch a 2-minute walkthrough on how to leverage our AI to generate project descriptions.</p><Link to="/showcase"><i className="fa-regular fa-circle-play" /> Watch Demo</Link></section></main><Footer /></div>;
 }
 
