@@ -1,3 +1,5 @@
+import { api } from './api.js';
+
 const read = (key, fallback) => {
   try {
     const value = localStorage.getItem(key);
@@ -28,49 +30,35 @@ export const DEFAULT_BUILDER = {
   ]
 };
 
+// Real accounts and portfolio content now live on the backend (server/).
+// This module only keeps a small local cache so the UI has something to
+// render instantly (name in the nav bar, etc.) before/between API calls,
+// and keeps the GitHub-import cache (harmless, public data).
 export const store = {
-  getUsers: () => read('autop_users', []),
-  saveUser(user) {
-    const users = store.getUsers().filter((item) => item.email !== user.email);
-    users.push(user);
-    write('autop_users', users);
-    store.setCurrentUser({ name: user.name, email: user.email });
-  },
-  findUser(email, password) {
-    return store.getUsers().find((user) => user.email === email && user.password === password);
-  },
-  getCurrentUser: () => read('currentUser', null),
+  getCurrentUser: () => read('autop_session', null),
   setCurrentUser(user) {
-    write('currentUser', user);
-    localStorage.setItem('isLoggedIn', 'true');
+    write('autop_session', user);
   },
   logout() {
-    localStorage.removeItem('currentUser');
-    localStorage.removeItem('isLoggedIn');
+    localStorage.removeItem('autop_session');
     localStorage.removeItem('autop_github');
+    localStorage.removeItem('builderCache');
+    localStorage.removeItem('builderSeeded');
+    api.setToken(null);
   },
-  getBuilder() {
-    const stored = read('builderData', {});
-    return { ...DEFAULT_BUILDER, ...stored };
-  },
-  saveBuilder(data) {
-    write('builderData', data);
-    localStorage.setItem('builderSavedAt', new Date().toISOString());
-  },
-  saveTemplate(template) {
-    localStorage.setItem('selectedTemplate', template);
-    store.saveBuilder({ ...store.getBuilder(), template });
-  },
-  saveMessage(key, payload) {
-    const messages = read(key, []);
-    messages.push({ ...payload, createdAt: new Date().toISOString() });
-    write(key, messages);
-  },
+
   getGithub: () => read('autop_github', null),
   saveGithub(username, profile, repos) {
     write('autop_github', { username, profile, repos, fetchedAt: new Date().toISOString() });
   },
   clearGithub() {
     localStorage.removeItem('autop_github');
+  },
+
+  // Contact form messages aren't part of the account system; kept local for now.
+  saveMessage(key, payload) {
+    const messages = read(key, []);
+    messages.push({ ...payload, createdAt: new Date().toISOString() });
+    write(key, messages);
   }
 };
