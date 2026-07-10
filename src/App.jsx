@@ -1,7 +1,11 @@
-import { Link, NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom';
+import { Link, NavLink, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import { store } from './storage.js';
+import { api } from './api.js';
+import { isValidEmail, isValidUrlOrEmpty, isValidGithubUsernameOrEmpty } from './validators.js';
 import { fetchProfile, fetchRepos, portfolioSeed } from './github.js';
+import { useAIAssist } from './hooks/useAIAssist.js';
+import { usePortfolio } from './hooks/usePortfolio.js';
 
 const TEMPLATES = [
   { id: 'minimal', name: 'Minimal', desc: 'Clean, editorial, lots of whitespace. Lets the work speak.' },
@@ -107,23 +111,127 @@ function Home() {
 function Auth({ mode }) {
   const navigate = useNavigate();
   const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
   const isSignup = mode === 'signup';
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault();
+    setError('');
     const form = new FormData(event.currentTarget);
     const email = String(form.get('email')).trim().toLowerCase();
     const password = String(form.get('password'));
-    if (isSignup) {
-      store.saveUser({ name: String(form.get('name')).trim() || 'Alex', email, password });
+    if (!isValidEmail(email)) return setError('Please enter a valid email address.');
+    if (isSignup && password.length < 6) return setError('Password must be at least 6 characters.');
+    setBusy(true);
+    try {
+      const res = isSignup
+        ? await api.signup({ name: String(form.get('name')).trim() || 'Alex', email, password })
+        : await api.login({ email, password });
+      api.setToken(res.token);
+      store.setCurrentUser(res.user);
       navigate('/dashboard');
-      return;
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
     }
-    const user = store.findUser(email, password);
-    if (!user) return setError('Email or password is incorrect.');
-    store.setCurrentUser({ name: user.name, email: user.email });
-    navigate('/dashboard');
   }
-  return <main className="auth-page"><Link className="home-icon" to="/"><i className="fa-solid fa-house" /></Link><form className="auth-card" onSubmit={submit}><span className="pill">AutoPortfolio</span><h1>{isSignup ? 'Create your account' : 'Sign in'}</h1><p>{isSignup ? 'Start turning your GitHub work into a polished portfolio.' : 'Continue building your professional portfolio workspace.'}</p>{isSignup && <><label>Name</label><input name="name" placeholder="Your name" required /></>}<label>Email</label><input name="email" type="email" placeholder="you@example.com" required /><label>Password</label><input name="password" type="password" placeholder="Your password" required /><button>{isSignup ? 'Create Account' : 'Sign In'}</button>{error && <small className="error">{error}</small>}<p className="switch">{isSignup ? 'Already have an account?' : "Don't have an account?"} <Link to={isSignup ? '/login' : '/signup'}>{isSignup ? 'Sign in' : 'Create account'}</Link></p></form></main>;
+  return <main className="auth-page"><Link className="home-icon" to="/"><i className="fa-solid fa-house" /></Link><form className="auth-card" onSubmit={submit}><span className="pill">AutoPortfolio</span><h1>{isSignup ? 'Create your account' : 'Sign in'}</h1><p>{isSignup ? 'Start turning your GitHub work into a polished portfolio.' : 'Continue building your professional portfolio workspace.'}</p>{isSignup && <><label>Name</label><input name="name" placeholder="Your name" required /></>}<label>Email</label><input name="email" type="email" placeholder="you@example.com" required /><label>Password</label><input name="password" type="password" placeholder="Your password" required minLength={isSignup ? 6 : undefined} /><button disabled={busy}>{busy ? 'Please wait…' : isSignup ? 'Create Account' : 'Sign In'}</button>{error && <small className="error">{error}</small>}<p className="switch">{isSignup ? 'Already have an account?' : "Don't have an account?"} <Link to={isSignup ? '/login' : '/signup'}>{isSignup ? 'Sign in' : 'Create account'}</Link></p></form></main>;
+}
+
+function AccountSettings() {
+  const navigate = useNavigate();
+  const user = store.getCurrentUser();
+  const [username, setUsernameField] = useState(user?.username || '');
+  const [check, setCheck] = useState(null); // null | 'checking' | 'available' | 'taken' | 'same'
+  const [savingName, setSavingName] = useState(false);
+  const [nameMsg, setNameMsg] = useState('');
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  useEffect(() => {
+    const clean = username.trim().toLowerCase();
+    if (!clean || clean === user?.username) { setCheck(clean === user?.username ? 'same' : null); return; }
+    setCheck('checking');
+    const t = setTimeout(() => {
+      api.checkUsername(clean).then((res) => setCheck(res.available ? 'available' : 'taken')).catch(() => setCheck(null));
+    }, 400);
+    return () => clearTimeout(t);
+  }, [username]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function saveUsername() {
+    setSavingName(true);
+    setNameMsg('');
+    try {
+      const res = await api.setUsername(username);
+      const nextUser = { ...user, username: res.username };
+      store.setCurrentUser(nextUser);
+      setUsernameField(res.username);
+      setCheck('same');
+      setNameMsg('Saved! Your public link is updated.');
+    } catch (err) {
+      setNameMsg(err.message);
+    } finally {
+      setSavingName(false);
+    }
+  }
+
+  async function deleteAccount() {
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await api.deleteAccount();
+      store.logout();
+      navigate('/');
+    } catch (err) {
+      setDeleteError(err.message);
+      setDeleting(false);
+    }
+  }
+
+  const publicUrl = `${window.location.origin}/u/${username.trim().toLowerCase() || user?.username || ''}`;
+
+  return <section className="account-settings">
+    <h2>Account settings</h2>
+
+    <div className="bfield">
+      <label>Public portfolio link</label>
+      <div className="username-edit">
+        <span className="username-prefix">{window.location.origin}/u/</span>
+        <input value={username} onChange={(e) => setUsernameField(e.target.value)} placeholder="your-name" />
+      </div>
+      {check === 'checking' && <small>Checking availability…</small>}
+      {check === 'available' && <small style={{ color: '#16a34a' }}>Available <button className="ghost-btn" type="button" disabled={savingName} onClick={saveUsername}>{savingName ? 'Saving…' : 'Save'}</button></small>}
+      {check === 'taken' && <small className="error">That link is already taken.</small>}
+      {nameMsg && <small>{nameMsg}</small>}
+      <small className="hint">Share: {publicUrl}</small>
+    </div>
+
+    <div className="danger-zone">
+      <h3>Delete account</h3>
+      <p>Permanently deletes your account and portfolio. This can't be undone.</p>
+      {!confirmingDelete
+        ? <button className="danger-btn" type="button" onClick={() => setConfirmingDelete(true)}>Delete my account</button>
+        : <div className="confirm-delete">
+            <p>Are you sure? Type your email to confirm.</p>
+            <input placeholder={user?.email} onChange={(e) => setDeleteError(e.target.value === user?.email ? '' : 'no-match')} id="confirm-email-input" />
+            <div>
+              <button className="ghost-btn" type="button" onClick={() => { setConfirmingDelete(false); setDeleteError(''); }}>Cancel</button>
+              <button
+                className="danger-btn"
+                type="button"
+                disabled={deleting}
+                onClick={(e) => {
+                  const input = document.getElementById('confirm-email-input');
+                  if (input?.value !== user?.email) { setDeleteError('Email does not match.'); return; }
+                  deleteAccount();
+                }}
+              >{deleting ? 'Deleting…' : 'Confirm delete'}</button>
+            </div>
+            {deleteError && deleteError !== 'no-match' && <small className="error">{deleteError}</small>}
+          </div>}
+    </div>
+  </section>;
 }
 
 function Dashboard() {
@@ -147,14 +255,19 @@ function Dashboard() {
       setError(err.message);
     }
   }
-  return <div className="framed dashboard-frame"><SiteNav active="dashboard" cta={false} /><main className="dashboard"><h1>Hello, {user?.name || 'Alex'}!</h1><p>How would you like to build your portfolio today?</p><div className="choice-grid"><article><i className="fa-solid fa-terminal icon navy" /><i className="fa-solid fa-cloud-arrow-up ghost" /><h2>Import from GitHub</h2><p>Seamlessly sync your technical journey. We auto-fetch your public repositories, top contributions, and language statistics.</p><form className="github-connect" onSubmit={connectGithub}><div className="gh-field"><i className="fa-brands fa-github" /><span className="gh-at">@</span><input name="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="your-github-username" autoComplete="off" spellCheck="false" required /></div><button disabled={status === 'loading'}>{status === 'loading' ? <><i className="fa-solid fa-rotate fa-spin" /> Syncing your repos…</> : <><i className="fa-brands fa-github" /> Connect GitHub</>}</button></form>{error && <small className="error">{error}</small>}<small>Fetches your public repositories</small></article><article><i className="fa-solid fa-wand-magic-sparkles icon mint" /><i className="fa-solid fa-pen ghost" /><h2>Build Manually</h2><p>Full creative control over every detail. Best for designers, product managers, or specific case studies.</p><button className="outline" onClick={() => choose('manual')}><i className="fa-regular fa-circle-plus" /> Start Building</button><small>Custom canvas approach</small></article></div><section className="guide"><span>Quick Start Guide</span><h2>New to AutoPortfolio?</h2><p>Watch a 2-minute walkthrough on how to leverage our AI to generate project descriptions.</p><Link to="/showcase"><i className="fa-regular fa-circle-play" /> Watch Demo</Link></section></main><Footer /></div>;
+  return <div className="framed dashboard-frame"><SiteNav active="dashboard" cta={false} /><main className="dashboard"><h1>Hello, {user?.name || 'Alex'}!</h1><p>How would you like to build your portfolio today?</p><div className="choice-grid"><article><i className="fa-solid fa-terminal icon navy" /><i className="fa-solid fa-cloud-arrow-up ghost" /><h2>Import from GitHub</h2><p>Seamlessly sync your technical journey. We auto-fetch your public repositories, top contributions, and language statistics.</p><form className="github-connect" onSubmit={connectGithub}><div className="gh-field"><i className="fa-brands fa-github" /><span className="gh-at">@</span><input name="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="your-github-username" autoComplete="off" spellCheck="false" required /></div><button disabled={status === 'loading'}>{status === 'loading' ? <><i className="fa-solid fa-rotate fa-spin" /> Syncing your repos…</> : <><i className="fa-brands fa-github" /> Connect GitHub</>}</button></form>{error && <small className="error">{error}</small>}<small>Fetches your public repositories</small></article><article><i className="fa-solid fa-wand-magic-sparkles icon mint" /><i className="fa-solid fa-pen ghost" /><h2>Build Manually</h2><p>Full creative control over every detail. Best for designers, product managers, or specific case studies.</p><button className="outline" onClick={() => choose('manual')}><i className="fa-regular fa-circle-plus" /> Start Building</button><small>Custom canvas approach</small></article></div><section className="guide"><span>Quick Start Guide</span><h2>New to AutoPortfolio?</h2><p>Watch a 2-minute walkthrough on how to leverage our AI to generate project descriptions.</p><Link to="/showcase"><i className="fa-regular fa-circle-play" /> Watch Demo</Link></section><AccountSettings /></main><Footer /></div>;
 }
 
 function Templates() {
   const navigate = useNavigate();
-  const current = store.getBuilder().template;
-  function use(id) { store.saveTemplate(id); navigate('/builder'); }
-  return <PageShell active="templates"><section className="inner-heading"><span className="pill">Templates</span><h1>Choose your portfolio style</h1><p>Each style restyles your whole portfolio. You can switch anytime in the builder.</p></section><div className="template-grid">{TEMPLATES.map((t) => <article className={`template-card${current === t.id ? ' selected' : ''}`} key={t.id}><div className={`template-preview ${t.id}`}>{current === t.id && <span className="tpl-badge"><i className="fa-solid fa-check" /> Selected</span>}</div><h2>{t.name}</h2><p>{t.desc}</p><button onClick={() => use(t.id)}>{current === t.id ? 'Edit in Builder' : 'Use Template'}</button></article>)}</div></PageShell>;
+  const { data, setData, save, loaded } = usePortfolio();
+  function use(id) {
+    const next = { ...data, template: id };
+    setData(next);
+    save(next);
+    navigate('/builder');
+  }
+  return <PageShell active="templates"><section className="inner-heading"><span className="pill">Templates</span><h1>Choose your portfolio style</h1><p>Each style restyles your whole portfolio. You can switch anytime in the builder.</p></section>{!loaded ? <p>Loading…</p> : <div className="template-grid">{TEMPLATES.map((t) => <article className={`template-card${data.template === t.id ? ' selected' : ''}`} key={t.id}><div className={`template-preview ${t.id}`}>{data.template === t.id && <span className="tpl-badge"><i className="fa-solid fa-check" /> Selected</span>}</div><h2>{t.name}</h2><p>{t.desc}</p><button onClick={() => use(t.id)}>{data.template === t.id ? 'Edit in Builder' : 'Use Template'}</button></article>)}</div>}</PageShell>;
 }
 
 const ACCENTS = ['#007b70', '#111a2c', '#2563eb', '#7c3aed', '#e11d48', '#ea580c', '#16a34a'];
@@ -162,13 +275,26 @@ const ACCENTS = ['#007b70', '#111a2c', '#2563eb', '#7c3aed', '#e11d48', '#ea580c
 function Builder() {
   const navigate = useNavigate();
   const github = store.getGithub();
-  const [data, setData] = useState(() => {
-    const base = store.getBuilder();
-    if (!localStorage.getItem('builderSeeded') && github?.profile) return { ...base, ...portfolioSeed(github) };
-    return base;
-  });
+  const ai = useAIAssist();
+  const { data, setData, save, loaded } = usePortfolio();
   const [saved, setSaved] = useState(false);
-  useEffect(() => { store.saveBuilder(data); localStorage.setItem('builderSeeded', '1'); }, [data]);
+  const [publishError, setPublishError] = useState('');
+
+  // Seed from GitHub once, the first time the builder loads with no prior data.
+  useEffect(() => {
+    if (loaded && !localStorage.getItem('builderSeeded') && github?.profile) {
+      setData((d) => ({ ...d, ...portfolioSeed(github) }));
+      localStorage.setItem('builderSeeded', '1');
+    }
+  }, [loaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Autosave to the server shortly after the user stops typing.
+  useEffect(() => {
+    if (!loaded) return;
+    const t = setTimeout(() => { save(data).catch(() => {}); }, 900);
+    return () => clearTimeout(t);
+  }, [data, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const set = (key) => (value) => setData((d) => ({ ...d, [key]: value }));
   const field = (key) => (e) => set(key)(e.target.value);
 
@@ -179,14 +305,23 @@ function Builder() {
   function setProjectTags(i, value) { setProject(i, 'tags', value.split(',').map((t) => t.trim()).filter(Boolean)); }
   function addProject() { set('projects')([...data.projects, { title: 'New Project', description: '', link: '', tags: [] }]); }
   function removeProject(i) { set('projects')(data.projects.filter((_, idx) => idx !== i)); }
-  function save() { store.saveBuilder(data); setSaved(true); setTimeout(() => setSaved(false), 1600); }
+  async function manualSave() { await save(data); setSaved(true); setTimeout(() => setSaved(false), 1600); }
+  async function publish() {
+    if (data.email && !isValidEmail(data.email)) return setPublishError('Fix your email before publishing.');
+    if (data.website && !isValidUrlOrEmpty(data.website)) return setPublishError('Fix your website link before publishing.');
+    if (data.github && !isValidGithubUsernameOrEmpty(data.github)) return setPublishError('Fix your GitHub username before publishing.');
+    setPublishError('');
+    await save(data);
+    navigate('/showcase');
+  }
 
   return <div className="builder-page">
     <header className="builder-bar">
       <Link className="brand" to="/dashboard"><i className="fa-solid fa-wand-magic-sparkles" /> AutoPortfolio</Link>
       <nav><Link to="/dashboard">Dashboard</Link><Link to="/templates">Templates</Link></nav>
-      <div className="builder-bar-actions"><button className="ghost-btn" onClick={save}><i className="fa-regular fa-floppy-disk" /> Save</button><button className="dark-btn" onClick={() => { store.saveBuilder(data); navigate('/showcase'); }}><i className="fa-solid fa-rocket" /> Publish</button></div>
+      <div className="builder-bar-actions"><button className="ghost-btn" onClick={manualSave}><i className="fa-regular fa-floppy-disk" /> Save</button><button className="dark-btn" onClick={publish}><i className="fa-solid fa-rocket" /> Publish</button></div>
     </header>
+    {publishError && <p className="error" style={{ padding: '10px 30px 0' }}>{publishError}</p>}
 
     <main className="builder-shell">
       <aside className="builder-panel">
@@ -204,17 +339,36 @@ function Builder() {
 
         {github?.profile && <button className="import-btn" onClick={importGithub}><i className="fa-brands fa-github" /> Import data from GitHub</button>}
 
+        <h3 className="panel-h">AI Assistant</h3>
+        {ai.error && <small className="error">{ai.error}</small>}
+
         <h3 className="panel-h">Identity</h3>
         <SkillField label="Name"><input value={data.name} onChange={field('name')} /></SkillField>
         <SkillField label="Role / title"><input value={data.role} onChange={field('role')} /></SkillField>
         <SkillField label="Tagline"><textarea rows="2" value={data.tagline} onChange={field('tagline')} /></SkillField>
-        <SkillField label="About"><textarea rows="4" value={data.about} onChange={field('about')} /></SkillField>
+        <SkillField label="About">
+          <textarea rows="4" value={data.about} onChange={field('about')} />
+          <button
+            type="button"
+            className="ai-btn"
+            disabled={ai.isLoading('about')}
+            onClick={async () => {
+              const result = await ai.improveAbout({ name: data.name, role: data.role, skills: data.skills, location: data.location, projects: data.projects });
+              if (result) set('about')(result);
+            }}
+          >
+            {ai.isLoading('about') ? <><i className="fa-solid fa-rotate fa-spin" /> Generating…</> : <><i className="fa-solid fa-wand-magic-sparkles" /> Generate with AI</>}
+          </button>
+        </SkillField>
 
         <h3 className="panel-h">Contact</h3>
         <SkillField label="Email"><input value={data.email} onChange={field('email')} /></SkillField>
+        {data.email && !isValidEmail(data.email) && <small className="error">That doesn't look like a valid email.</small>}
         <SkillField label="Location"><input value={data.location} onChange={field('location')} placeholder="City, Country" /></SkillField>
         <SkillField label="Website"><input value={data.website} onChange={field('website')} placeholder="example.com" /></SkillField>
+        {data.website && !isValidUrlOrEmpty(data.website) && <small className="error">That doesn't look like a valid website.</small>}
         <SkillField label="GitHub username"><input value={data.github} onChange={field('github')} placeholder="username" /></SkillField>
+        {data.github && !isValidGithubUsernameOrEmpty(data.github) && <small className="error">That doesn't look like a valid GitHub username.</small>}
 
         <h3 className="panel-h">Skills</h3>
         <div className="chip-row">{data.skills.map((skill) => <span className="chip" key={skill}>{skill}<button onClick={() => removeSkill(skill)} aria-label="Remove">×</button></span>)}</div>
@@ -225,6 +379,17 @@ function Builder() {
           <div className="proj-edit-head"><strong>Project {i + 1}</strong><button className="del-btn" onClick={() => removeProject(i)} aria-label="Delete"><i className="fa-solid fa-trash" /></button></div>
           <input value={project.title} onChange={(e) => setProject(i, 'title', e.target.value)} placeholder="Title" />
           <textarea rows="2" value={project.description} onChange={(e) => setProject(i, 'description', e.target.value)} placeholder="Description" />
+          <button
+            type="button"
+            className="ai-btn small"
+            disabled={ai.isLoading(`project-${i}`)}
+            onClick={async () => {
+              const result = await ai.improveDescription(i, project, { role: data.role, skills: data.skills });
+              if (result) setProject(i, 'description', result);
+            }}
+          >
+            {ai.isLoading(`project-${i}`) ? <><i className="fa-solid fa-rotate fa-spin" /> Improving…</> : <><i className="fa-solid fa-wand-magic-sparkles" /> Improve with AI</>}
+          </button>
           <input value={project.link} onChange={(e) => setProject(i, 'link', e.target.value)} placeholder="Link (https://…)" />
           <input value={(project.tags || []).join(', ')} onChange={(e) => setProjectTags(i, e.target.value)} placeholder="Tags (comma separated)" />
         </div>)}
@@ -245,15 +410,43 @@ function Builder() {
 function SkillField({ label, children }) { return <div className="bfield"><label>{label}</label>{children}</div>; }
 
 function Showcase() {
-  const data = store.getBuilder();
+  const { data, loaded } = usePortfolio();
+  const user = store.getCurrentUser();
+  const [copied, setCopied] = useState(false);
+  const publicUrl = user?.username ? `${window.location.origin}/u/${user.username}` : '';
+  function copyLink() {
+    if (!publicUrl) return;
+    navigator.clipboard?.writeText(publicUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1600);
+  }
+  if (!loaded) return <div className="showcase-frame"><p style={{ padding: '4rem', textAlign: 'center' }}>Loading…</p></div>;
   return <div className="showcase-frame">
     <Portfolio data={data} />
     <div className="owner-bar">
       <span className="owner-tag"><i className="fa-solid fa-eye" /> Preview</span>
+      {publicUrl && <button className="owner-edit" onClick={copyLink} type="button"><i className={`fa-solid ${copied ? 'fa-check' : 'fa-link'}`} /> {copied ? 'Copied!' : publicUrl.replace(/^https?:\/\//, '')}</button>}
       <Link className="owner-edit" to="/builder"><i className="fa-solid fa-pen" /> Edit portfolio</Link>
       <Link className="owner-home" to="/dashboard" aria-label="Dashboard"><i className="fa-solid fa-house" /></Link>
     </div>
   </div>;
+}
+
+// Read-only, public, no login required — this is the link you actually share.
+function PublicPortfolio() {
+  const { username } = useParams();
+  const [data, setData] = useState(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    api.getPublicPortfolio(username)
+      .then((res) => { if (active) setData(res.portfolio); })
+      .catch((err) => { if (active) setError(err.message); });
+    return () => { active = false; };
+  }, [username]);
+  if (error) return <main style={{ padding: '5rem 2rem', textAlign: 'center' }}><h1>Portfolio not found</h1><p>{error}</p><Link to="/">Go home</Link></main>;
+  if (!data) return <main style={{ padding: '5rem 2rem', textAlign: 'center' }}><p>Loading…</p></main>;
+  return <Portfolio data={data} />;
 }
 
 function RepoGrid({ repos, username }) {
@@ -292,5 +485,5 @@ function RequireAuth({ children }) {
 }
 
 export default function App() {
-  return <Routes><Route path="/" element={<Home />} /><Route path="/login" element={<Auth mode="login" />} /><Route path="/signup" element={<Auth mode="signup" />} /><Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} /><Route path="/templates" element={<RequireAuth><Templates /></RequireAuth>} /><Route path="/builder" element={<RequireAuth><Builder /></RequireAuth>} /><Route path="/showcase" element={<RequireAuth><Showcase /></RequireAuth>} /><Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} /><Route path="/contact" element={<Contact />} /></Routes>;
+  return <Routes><Route path="/" element={<Home />} /><Route path="/login" element={<Auth mode="login" />} /><Route path="/signup" element={<Auth mode="signup" />} /><Route path="/dashboard" element={<RequireAuth><Dashboard /></RequireAuth>} /><Route path="/templates" element={<RequireAuth><Templates /></RequireAuth>} /><Route path="/builder" element={<RequireAuth><Builder /></RequireAuth>} /><Route path="/showcase" element={<RequireAuth><Showcase /></RequireAuth>} /><Route path="/profile" element={<RequireAuth><Profile /></RequireAuth>} /><Route path="/contact" element={<Contact />} /><Route path="/u/:username" element={<PublicPortfolio />} /></Routes>;
 }
